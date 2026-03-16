@@ -171,6 +171,58 @@ async def serve_audio(filename: str):
     )
 
 
+class SearchQuery(BaseModel):
+    query: str
+    max_results: int = 5
+
+
+class AddTrackRequest(BaseModel):
+    query: str  # song name or YouTube URL
+
+
+@app.post("/search")
+async def search_music(req: SearchQuery):
+    """Search for tracks on YouTube."""
+    from ..sources.youtube import search_tracks
+    results = search_tracks(req.query, req.max_results)
+    return [
+        {
+            "video_id": r.video_id,
+            "title": r.title,
+            "artist": r.artist,
+            "duration": r.duration,
+            "url": r.url,
+            "thumbnail": r.thumbnail,
+        }
+        for r in results
+    ]
+
+
+@app.post("/add")
+async def add_track(req: AddTrackRequest):
+    """Download a track from YouTube, analyze it, and add to library."""
+    from ..sources.youtube import download_track
+
+    dl = download_track(req.query, str(AUDIO_DIR))
+    if not dl:
+        raise HTTPException(500, "Failed to download track")
+
+    try:
+        profile = analyze_track(dl.file_path)
+        track_store.save(profile)
+        return {
+            "status": "ok",
+            "title": profile.title,
+            "artist": dl.artist,
+            "bpm": profile.bpm,
+            "key": profile.key,
+            "duration": profile.duration,
+            "file_path": profile.file_path,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Analysis failed: {str(e)}")
+
+
 @app.get("/library")
 async def get_library():
     """Get all analyzed tracks."""

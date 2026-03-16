@@ -285,6 +285,65 @@ def _print_profile_detail(profile: TrackProfile):
 
 
 @cli.command()
+@click.argument("query")
+@click.option("--max-results", default=5, type=int, help="Number of results.")
+def search(query: str, max_results: int):
+    """Search for tracks on YouTube."""
+    from .sources.youtube import search_tracks
+    click.echo(f"Searching: {query}\n")
+    results = search_tracks(query, max_results)
+    if not results:
+        click.echo("No results found.")
+        return
+    for i, r in enumerate(results, 1):
+        dur = f"{r.duration // 60}:{r.duration % 60:02d}" if r.duration else "?"
+        click.echo(f"  {i}. {r.title}")
+        click.echo(f"     {r.artist} | {dur} | {r.url}")
+
+
+@cli.command(name="add")
+@click.argument("queries", nargs=-1, required=True)
+@click.option("--db", default="tracks.db", help="Path to track database.")
+@click.option("--output-dir", default="samples", help="Audio output directory.")
+@click.option("--no-classify", is_flag=True, help="Skip ML classification.")
+def add_tracks(queries: tuple[str, ...], db: str, output_dir: str, no_classify: bool):
+    """Download tracks from YouTube, analyze, and add to library.
+
+    Pass song names or YouTube URLs as arguments.
+
+    Examples:
+        agent-dj add "Daft Punk - Around the World"
+        agent-dj add "Norah Jones Don't Know Why" "Erykah Badu Bag Lady"
+    """
+    from .sources.youtube import download_track
+
+    store = TrackStore(db)
+
+    for i, query in enumerate(queries, 1):
+        click.echo(f"\n[{i}/{len(queries)}] {query}")
+
+        # Download
+        click.echo("  Downloading...")
+        dl = download_track(query, output_dir)
+        if not dl:
+            click.echo("  FAILED to download.")
+            continue
+        click.echo(f"  -> {dl.title} by {dl.artist} ({dl.duration}s)")
+
+        # Analyze
+        click.echo("  Analyzing...")
+        try:
+            profile = analyze_track(dl.file_path, run_classifier=not no_classify)
+            store.save(profile)
+            _print_profile_summary(profile)
+        except Exception as e:
+            click.echo(f"  ERROR analyzing: {e}")
+            continue
+
+    click.echo(f"\nLibrary now has {store.count()} tracks.")
+
+
+@cli.command()
 @click.option("--host", default="0.0.0.0", help="Server host.")
 @click.option("--port", default=8000, type=int, help="Server port.")
 def serve(host: str, port: int):
