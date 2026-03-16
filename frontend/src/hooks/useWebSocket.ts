@@ -17,6 +17,9 @@ export function useWebSocket({ sessionId, token, onMessage }: UseWebSocketOption
   const reconnectTimer = useRef<number | null>(null);
 
   const connect = useCallback(() => {
+    // Don't connect without valid session info
+    if (!sessionId || !token) return;
+
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.hostname;
     const port = 8000;
@@ -38,20 +41,24 @@ export function useWebSocket({ sessionId, token, onMessage }: UseWebSocketOption
 
     ws.onclose = () => {
       setConnected(false);
-      // Reconnect after 2 seconds
-      reconnectTimer.current = window.setTimeout(connect, 2000);
+      // Only reconnect if we have valid session info
+      if (sessionId && token) {
+        reconnectTimer.current = window.setTimeout(connect, 3000);
+      }
     };
 
     ws.onerror = () => ws.close();
   }, [sessionId, token, onMessage]);
 
   useEffect(() => {
+    if (!sessionId || !token) return;
+
     connect();
     return () => {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, [connect, sessionId, token]);
 
   const send = useCallback((msg: WSMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
