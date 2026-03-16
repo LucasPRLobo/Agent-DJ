@@ -30,7 +30,7 @@ class VibeParser:
 
         # Get the DJ's opening message
         response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=300,
             system=ONBOARDING_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": "Hey, I need a DJ for tonight!"}],
@@ -53,7 +53,7 @@ class VibeParser:
         session.messages.append({"role": "user", "content": user_message})
 
         response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=500,
             system=ONBOARDING_SYSTEM_PROMPT,
             messages=session.messages,

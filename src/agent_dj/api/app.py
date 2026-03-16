@@ -5,6 +5,9 @@ import json
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file
+
 import qrcode
 from fastapi import FastAPI, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -253,46 +256,89 @@ async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
 
     role, name = auth
 
-    # During onboarding, use vibe parser
+    # During onboarding, use vibe parser (or fallback if no API key)
     if session.state == SessionState.ONBOARDING:
-        parser = get_vibe_parser()
+        use_llm = bool(os.environ.get("ANTHROPIC_API_KEY"))
 
-        # Initialize onboarding if first message
-        if not session.chat_history:
-            onboarding, opening = parser.start_session()
-            session.chat_history = onboarding.messages
-            # Send opening message
-            await ws_mgr.send_to_session(session_id, {
-                "type": "chat_message",
-                "from": "dj",
-                "message": opening,
-            })
+        if use_llm:
+            try:
+                parser = get_vibe_parser()
 
-        # Create a temporary onboarding session from history
-        from ..chat.vibe_parser import OnboardingSession
-        onboarding = OnboardingSession(messages=list(session.chat_history))
+                # Initialize onboarding if first message
+                if not session.chat_history:
+                    onboarding, opening = parser.start_session()
+                    session.chat_history = onboarding.messages
+                    await ws_mgr.send_to_session(session_id, {
+                        "type": "chat_message",
+                        "from": "dj",
+                        "message": opening,
+                    })
 
-        dj_response = parser.send_message(onboarding, msg.message)
-        session.chat_history = onboarding.messages
+                from ..chat.vibe_parser import OnboardingSession
+                onboarding = OnboardingSession(messages=list(session.chat_history))
 
-        # Broadcast the messages
-        await ws_mgr.send_to_session(session_id, {
-            "type": "chat_message",
-            "from": name,
-            "message": msg.message,
-        })
-        await ws_mgr.send_to_session(session_id, {
-            "type": "chat_message",
-            "from": "dj",
-            "message": dj_response,
-        })
+                dj_response = parser.send_message(onboarding, msg.message)
+                session.chat_history = onboarding.messages
 
-        # If onboarding complete, transition to playing
-        if onboarding.is_complete and onboarding.vibe_profile:
-            session.vibe_profile = onboarding.vibe_profile
+                await ws_mgr.send_to_session(session_id, {
+                    "type": "chat_message",
+                    "from": name,
+                    "message": msg.message,
+                })
+                await ws_mgr.send_to_session(session_id, {
+                    "type": "chat_message",
+                    "from": "dj",
+                    "message": dj_response,
+                })
+
+                if onboarding.is_complete and onboarding.vibe_profile:
+                    session.vibe_profile = onboarding.vibe_profile
+                    session.state = SessionState.PLAYING
+
+                    tracks = track_store.get_all()
+                    set_plan = plan_set(tracks, session.vibe_profile, SelectionStrategy.GREEDY_SCORING)
+                    session.queue = [t.file_path for t in set_plan.tracks]
+
+                    await ws_mgr.send_to_session(session_id, {
+                        "type": "session_started",
+                        "vibe": session.vibe_profile.to_dict(),
+                        "set_plan": set_plan.to_dict(),
+                    })
+
+                return {"response": dj_response, "state": session.state.value}
+
+            except Exception as e:
+                # LLM failed — fall through to preset mode
+                print(f"LLM error, falling back to preset mode: {e}")
+                use_llm = False
+
+        # Fallback: no LLM — use preset based on user message keywords
+        if not use_llm:
+            from ..planner.vibe_profile import chill_jazz_party, house_party, dinner_ambient
+
+            user_msg = msg.message.lower()
+            if any(w in user_msg for w in ["dance", "house", "party", "energy", "electronic"]):
+                vibe = house_party()
+                vibe_name = "House Party"
+            elif any(w in user_msg for w in ["dinner", "calm", "quiet", "background", "ambient"]):
+                vibe = dinner_ambient()
+                vibe_name = "Dinner Ambient"
+            else:
+                vibe = chill_jazz_party()
+                vibe_name = "Chill Jazz"
+
+            session.vibe_profile = vibe
             session.state = SessionState.PLAYING
 
-            # Plan initial set
+            dj_response = f"Got it! Setting up a {vibe_name} vibe for you. Let's go!"
+
+            await ws_mgr.send_to_session(session_id, {
+                "type": "chat_message", "from": name, "message": msg.message,
+            })
+            await ws_mgr.send_to_session(session_id, {
+                "type": "chat_message", "from": "dj", "message": dj_response,
+            })
+
             tracks = track_store.get_all()
             set_plan = plan_set(tracks, session.vibe_profile, SelectionStrategy.GREEDY_SCORING)
             session.queue = [t.file_path for t in set_plan.tracks]
@@ -303,11 +349,38 @@ async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
                 "set_plan": set_plan.to_dict(),
             })
 
-        return {"response": dj_response, "state": session.state.value}
+            return {"response": dj_response, "state": session.state.value}
 
-    # During playback, use command parser
-    cmd_parser = get_command_parser()
-    command = cmd_parser.parse(msg.message)
+    # During playback, handle commands (simple keyword matching if no LLM)
+    command_type = "chat"
+    command_params: dict = {}
+    dj_resp = ""
+
+    user_lower = msg.message.lower()
+    if any(w in user_lower for w in ["skip", "next"]):
+        command_type = "skip"
+    elif any(w in user_lower for w in ["play ", "request "]):
+        command_type = "request"
+        command_params = {"query": msg.message}
+    elif any(w in user_lower for w in ["more energy", "louder", "pump", "harder"]):
+        command_type = "adjust_energy"
+        command_params = {"direction": "up"}
+    elif any(w in user_lower for w in ["chill", "calm", "quiet", "slow"]):
+        command_type = "adjust_energy"
+        command_params = {"direction": "down"}
+    elif any(w in user_lower for w in ["wind down", "end", "finish", "stop"]):
+        command_type = "wind_down"
+
+    # Try LLM command parser if available
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            cmd_parser = get_command_parser()
+            command = cmd_parser.parse(msg.message)
+            command_type = command.type
+            command_params = command.parameters
+            dj_resp = command.dj_response
+        except Exception:
+            pass  # fall through to keyword-based parsing above
 
     await ws_mgr.send_to_session(session_id, {
         "type": "chat_message",
@@ -316,13 +389,13 @@ async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
     })
 
     # Handle commands
-    if command.type == "skip":
+    if command_type == "skip":
         await ws_mgr.send_to_session(session_id, {"type": "skip"})
-    elif command.type == "request":
+    elif command_type == "request":
         perm = session_mgr.get_guest_permission(session_id, token)
         if perm in (GuestPermission.REQUEST, GuestPermission.VOTE, GuestPermission.COHOST):
             req = SongRequest(
-                query=command.parameters.get("query", ""),
+                query=command_params.get("query", msg.message),
                 requested_by=name,
             )
             session.song_requests.append(req)
@@ -331,21 +404,21 @@ async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
                 "query": req.query,
                 "from": name,
             })
-    elif command.type in ("adjust_energy", "adjust_genre", "adjust_tempo", "wind_down"):
+    elif command_type in ("adjust_energy", "adjust_genre", "adjust_tempo", "wind_down"):
         await ws_mgr.send_to_session(session_id, {
             "type": "dj_command",
-            "command": command.type,
-            "parameters": command.parameters,
+            "command": command_type,
+            "parameters": command_params,
         })
 
-    if command.dj_response:
+    if dj_resp:
         await ws_mgr.send_to_session(session_id, {
             "type": "chat_message",
             "from": "dj",
-            "message": command.dj_response,
+            "message": dj_resp,
         })
 
-    return {"response": command.dj_response or "Got it!", "command": command.type}
+    return {"response": dj_resp or "Got it!", "command": command_type}
 
 
 # ── WebSocket ──
