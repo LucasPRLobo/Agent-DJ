@@ -284,5 +284,16 @@ def _print_profile_detail(profile: TrackProfile):
         click.echo(f"  Embedding dim:   {len(clf.embedding)}")
 
 
+@cli.command()
+@click.option("--host", default="0.0.0.0", help="Server host.")
+@click.option("--port", default=8000, type=int, help="Server port.")
+def serve(host: str, port: int):
+    """Start the Agent DJ backend server."""
+    from .api.app import run_server
+    click.echo(f"Starting Agent DJ server on {host}:{port}")
+    click.echo(f"API docs: http://localhost:{port}/docs")
+    run_server(host=host, port=port)
+
+
 if __name__ == "__main__":
     cli()
