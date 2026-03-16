@@ -5,7 +5,7 @@
  * crossfade, bass swap, loop blend, hard cut, echo out, breakdown blend.
  */
 
-import { AudioEngine, DeckId } from "./AudioEngine";
+import { AudioEngine, type DeckId } from "./AudioEngine";
 
 export interface TransitionParams {
   type: "crossfade" | "bass_swap" | "loop_blend" | "hard_cut" | "echo_out" | "breakdown";

@@ -6,8 +6,8 @@
  * Listens for transition triggers and executes them.
  */
 
-import { AudioEngine, DeckId } from "./AudioEngine";
-import { TransitionExecutor, TransitionParams } from "./TransitionExecutor";
+import { AudioEngine, type DeckId } from "./AudioEngine";
+import { TransitionExecutor, type TransitionParams } from "./TransitionExecutor";
 
 export interface TrackInfo {
   filePath: string;
@@ -110,7 +110,6 @@ export class PlaybackController {
     const transition = this.nextTransition;
 
     // Calculate playback rate for BPM matching
-    const currentBpm = this.currentTrack?.bpm ?? 120;
     const toPlaybackRate = transition.targetBpm / (this.nextTrack.bpm || 120);
 
     const params: TransitionParams = {

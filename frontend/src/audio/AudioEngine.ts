@@ -30,9 +30,6 @@ export class AudioEngine {
   private masterGain: GainNode;
   private decks: Record<DeckId, DeckState>;
 
-  // Effects nodes (shared)
-  private reverbNode: ConvolverNode | null = null;
-
   constructor() {
     this.ctx = new AudioContext();
     this.masterGain = this.ctx.createGain();
