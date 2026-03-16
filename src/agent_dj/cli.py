@@ -139,6 +139,52 @@ def similar(track_path: str, db: str, top_n: int):
         click.echo(f"  {score:.3f}  {t.title:<35} {t.bpm:>6.1f} BPM | {t.key:>3}")
 
 
+@cli.command()
+@click.option("--db", default="tracks.db", help="Path to track database.")
+@click.option("--preset", type=click.Choice(["chill_jazz", "house_party", "dinner"]),
+              default=None, help="Use a preset vibe profile.")
+@click.option("--strategy", type=click.Choice(["greedy_scoring", "graph_greedy", "graph_beam", "clustering"]),
+              default="greedy_scoring", help="Track selection strategy.")
+@click.option("--duration", default=None, type=int, help="Set duration in minutes.")
+@click.option("--n-tracks", default=None, type=int, help="Number of tracks to select.")
+@click.option("--json-output", is_flag=True, help="Output as JSON.")
+def plan(db: str, preset: str | None, strategy: str, duration: int | None,
+         n_tracks: int | None, json_output: bool):
+    """Plan a DJ set from analyzed tracks."""
+    from .planner.set_planner import SelectionStrategy, plan_set
+    from .planner.vibe_profile import chill_jazz_party, dinner_ambient, house_party
+
+    store = TrackStore(db)
+    tracks = store.get_all()
+
+    if not tracks:
+        click.echo("No tracks in database. Run 'agent-dj analyze' first.")
+        return
+
+    # Get vibe profile
+    if preset == "chill_jazz":
+        vibe = chill_jazz_party(duration or 45)
+    elif preset == "house_party":
+        vibe = house_party(duration or 120)
+    elif preset == "dinner":
+        vibe = dinner_ambient(duration or 90)
+    else:
+        # Default
+        vibe = chill_jazz_party(duration or 45)
+        click.echo("Using default 'chill_jazz' preset. Use --preset to change.\n")
+
+    if duration:
+        vibe.duration_minutes = duration
+
+    strat = SelectionStrategy(strategy)
+    set_plan = plan_set(tracks, vibe, strat, n_tracks)
+
+    if json_output:
+        click.echo(set_plan.to_json())
+    else:
+        click.echo(set_plan.summary())
+
+
 @cli.command(name="download-models")
 @click.option("--model-dir", default=None, help="Path to store model files.")
 def download_models(model_dir: str | None):
