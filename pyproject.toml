@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-dj"
+version = "0.1.0"
+description = "AI DJ Agent — describe a vibe, get a live DJ set"
+requires-python = ">=3.11"
+dependencies = [
+    "librosa>=0.10",
+    "essentia",
+    "pyloudnorm>=0.1",
+    "pydub>=0.25",
+    "pyrubberband>=0.3",
+    "numpy",
+    "scipy",
+    "soundfile",
+    "click",
+    "anthropic",
+]
+
+[project.scripts]
+agent-dj = "agent_dj.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -45,3 +45,10 @@ samples/
 # Coverage
 .coverage
 htmlcov/
+
+# ML Models (large binary files)
+models/*.pb
+models/*.h5
+
+# Output
+output/
