@@ -25,7 +25,8 @@ Thumbs.db
 
 # Environment
 .env
-.env.*
+.env.local
+.env.production
 
 # Audio samples (keep local, don't push to repo)
 samples/

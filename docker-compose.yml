@@ -1,0 +1,14 @@
+services:
+  agent-dj:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./samples:/app/samples
+      - ./models:/app/models
+      - ./tracks.db:/app/tracks.db
+    environment:
+      - AGENT_DJ_DB=/app/tracks.db
+      - AGENT_DJ_AUDIO_DIR=/app/samples
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    restart: unless-stopped
