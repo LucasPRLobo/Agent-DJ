@@ -333,7 +333,8 @@ def add_tracks(queries: tuple[str, ...], db: str, output_dir: str, no_classify: 
         # Analyze
         click.echo("  Analyzing...")
         try:
-            profile = analyze_track(dl.file_path, run_classifier=not no_classify)
+            song_title = f"{dl.title} - {dl.artist}" if dl.artist != "Unknown" else dl.title
+            profile = analyze_track(dl.file_path, run_classifier=not no_classify, title=song_title)
             store.save(profile)
             _print_profile_summary(profile)
         except Exception as e:

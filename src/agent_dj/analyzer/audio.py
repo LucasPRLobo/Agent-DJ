@@ -89,6 +89,7 @@ def analyze_track(
     file_path: str | Path,
     run_classifier: bool = True,
     model_dir: Path | None = None,
+    title: str | None = None,
 ) -> TrackProfile:
     """Run full analysis pipeline on an audio file.
 
@@ -101,7 +102,8 @@ def analyze_track(
         TrackProfile with all extracted features.
     """
     file_path = Path(file_path)
-    title = file_path.stem
+    if not title:
+        title = file_path.stem
 
     # Load audio (mono, 44.1kHz for librosa)
     y, sr = librosa.load(str(file_path), sr=44100, mono=True)

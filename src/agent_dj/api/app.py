@@ -211,7 +211,8 @@ async def add_track(req: AddTrackRequest):
         raise HTTPException(500, "Failed to download track")
 
     try:
-        profile = analyze_track(dl.file_path)
+        song_title = f"{dl.title} - {dl.artist}" if dl.artist != "Unknown" else dl.title
+        profile = analyze_track(dl.file_path, title=song_title)
         track_store.save(profile)
         return {
             "status": "ok",
