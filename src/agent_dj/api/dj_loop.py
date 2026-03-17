@@ -13,6 +13,7 @@ import numpy as np
 from ..analyzer.audio import TrackProfile
 from ..analyzer.track_store import TrackStore
 from ..planner.energy_tracker import EnergyTracker
+from ..sources.background_fetcher import BackgroundFetcher
 from ..planner.strategies.scoring import score_track
 from ..planner.transition_planner import plan_transition
 from ..planner.vibe_profile import VibeProfile
@@ -48,6 +49,7 @@ class DJLoop:
         self.next_track: TrackProfile | None = None
         self.next_transition = None
         self.needs_replan = False
+        self.bg_fetcher = BackgroundFetcher(track_store, audio_dir)
         self._task: asyncio.Task | None = None
         self._running = False
 
@@ -61,6 +63,7 @@ class DJLoop:
     def stop(self):
         """Stop the DJ loop."""
         self._running = False
+        self.bg_fetcher.stop()
         if self._task:
             self._task.cancel()
 
@@ -68,6 +71,9 @@ class DJLoop:
         """Signal that the vibe changed and next track should be re-planned."""
         self.needs_replan = True
         self.next_track = None
+        # Update background fetcher with new vibe
+        if self.session.vibe_profile:
+            self.bg_fetcher.update_vibe(self.session.vibe_profile)
 
     async def _run(self):
         """Main DJ loop."""
@@ -76,6 +82,9 @@ class DJLoop:
             return
 
         self.energy_tracker = EnergyTracker(vibe)
+
+        # Start background fetcher — continuously builds the track pool
+        self.bg_fetcher.start(vibe)
 
         # Play first track
         first_track = await self._pick_first_track(vibe)
@@ -205,6 +214,7 @@ class DJLoop:
         """Called by the frontend (via WebSocket) when a transition finishes."""
         if self.next_track:
             self.played_tracks.append(self.next_track)
+            self.bg_fetcher.mark_played(self.next_track.file_path)
             set_pos = min(1.0, len(self.played_tracks) * 0.05)
             if self.energy_tracker:
                 self.energy_tracker.record(self.next_track, set_pos)
