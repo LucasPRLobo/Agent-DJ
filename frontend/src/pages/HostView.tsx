@@ -31,11 +31,6 @@ interface TransitionInfo {
   target_bpm: number;
 }
 
-interface SetPlan {
-  tracks: TrackInfo[];
-  transitions: TransitionInfo[];
-}
-
 export function HostView() {
   const { session, loading, createSession, sendChat, getQrUrl } = useSession();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -49,9 +44,9 @@ export function HostView() {
 
   // Audio engine
   const engineRef = useRef<AudioEngine | null>(null);
-  const planRef = useRef<SetPlan | null>(null);
   const trackIndexRef = useRef(0);
   const positionTimerRef = useRef<number | null>(null);
+  const sendRef = useRef<(msg: { type: string; [key: string]: unknown }) => void>(() => {});
 
   // Clean up audio on unmount
   useEffect(() => {
@@ -61,112 +56,33 @@ export function HostView() {
     };
   }, []);
 
-  const getAudioUrl = (filePath: string) => {
-    // Extract filename from path like "samples/K0HSD_i2DvA.wav"
-    const filename = filePath.split("/").pop() || filePath;
-    return `${API_BASE}/audio/${filename}`;
-  };
-
-  const startPlayback = useCallback(async (plan: SetPlan) => {
-    if (plan.tracks.length === 0) return;
-
-    // Initialize audio engine
-    const engine = new AudioEngine();
-    await engine.resume();
-    engineRef.current = engine;
-    planRef.current = plan;
-    trackIndexRef.current = 0;
-
-    // Load and play first track
-    const firstTrack = plan.tracks[0];
-    const url = getAudioUrl(firstTrack.file_path);
-
-    try {
-      await engine.loadTrack("A", url);
-      engine.setGain("A", 1);
-      engine.play("A", 0);
-      setCurrentTrack(firstTrack);
-      setCurrentIndex(0);
-
-      // Pre-load next track
-      if (plan.tracks.length > 1) {
-        const nextUrl = getAudioUrl(plan.tracks[1].file_path);
-        engine.loadTrack("B", nextUrl);
-      }
-
-      // Start position tracking
-      positionTimerRef.current = window.setInterval(() => {
-        if (!engineRef.current) return;
-        const idx = trackIndexRef.current;
-        const activeDeck = idx % 2 === 0 ? "A" : "B";
-        const pos = engineRef.current.getPosition(activeDeck as "A" | "B");
-        setPosition(pos);
-
-        // Check if we should transition
-        const plan = planRef.current;
-        if (plan && idx < plan.transitions.length) {
-          const transition = plan.transitions[idx];
-          if (pos >= transition.mix_out_time) {
-            doTransition(idx);
-          }
-        }
-      }, 200);
-    } catch (err) {
-      console.error("Failed to start playback:", err);
-    }
-  }, []);
-
-  const doTransition = useCallback(async (fromIndex: number) => {
+  const doRollingTransition = useCallback((fromIndex: number, nextTrack: TrackInfo, _audioUrl: string, transition: TransitionInfo) => {
     const engine = engineRef.current;
-    const plan = planRef.current;
-    if (!engine || !plan) return;
+    if (!engine || trackIndexRef.current !== fromIndex) return;
 
     const nextIndex = fromIndex + 1;
-    if (nextIndex >= plan.tracks.length) return;
-
-    // Prevent re-triggering
-    if (trackIndexRef.current !== fromIndex) return;
     trackIndexRef.current = nextIndex;
 
     const fromDeck = fromIndex % 2 === 0 ? "A" : "B";
     const toDeck = fromIndex % 2 === 0 ? "B" : "A";
-    const transition = plan.transitions[fromIndex];
-    const nextTrack = plan.tracks[nextIndex];
 
-    // Ensure next track is loaded
-    const nextUrl = getAudioUrl(nextTrack.file_path);
-    try {
-      await engine.loadTrack(toDeck as "A" | "B", nextUrl);
-    } catch {
-      // Already loaded
-    }
-
-    // Calculate playback rate for BPM matching
     const rate = transition.target_bpm / (nextTrack.bpm || 120);
-
-    // Execute crossfade transition
     const duration = transition.duration_seconds || 8;
+
     engine.setGain(toDeck as "A" | "B", 0);
     engine.play(toDeck as "A" | "B", transition.mix_in_time || 0, rate);
     engine.rampGain(toDeck as "A" | "B", 1, duration);
     engine.rampGain(fromDeck as "A" | "B", 0, duration);
 
-    // Update UI
     setCurrentTrack(nextTrack);
     setCurrentIndex(nextIndex);
     setPosition(0);
 
-    // Stop old deck after transition
     setTimeout(() => {
       engine.stopDeck(fromDeck as "A" | "B");
+      // Tell backend the transition is done
+      sendRef.current({ type: "transition_complete" });
     }, duration * 1000);
-
-    // Pre-load the track after next
-    if (nextIndex + 1 < plan.tracks.length) {
-      const preloadDeck = fromDeck;
-      const preloadUrl = getAudioUrl(plan.tracks[nextIndex + 1].file_path);
-      engine.loadTrack(preloadDeck as "A" | "B", preloadUrl);
-    }
   }, []);
 
   const handleWSMessage = useCallback((msg: WSMessage) => {
@@ -177,28 +93,94 @@ export function HostView() {
           { from: msg.from as string, message: msg.message as string },
         ]);
         break;
+
       case "session_started": {
         setSessionState("playing");
-        const plan = msg.set_plan as SetPlan;
         const vibe = msg.vibe as { energy_arc: number[] };
-        if (plan?.tracks) {
-          setQueue(plan.tracks);
-          startPlayback(plan);
-        }
         if (vibe?.energy_arc) setEnergyArc(vibe.energy_arc);
+        // Don't start playback here — wait for play_track from DJ loop
         break;
       }
+
+      case "play_track": {
+        // DJ loop tells us to play the first track
+        const track = msg.track as TrackInfo;
+        const audioUrl = `${API_BASE}${msg.audio_url as string}`;
+        setCurrentTrack(track);
+        setCurrentIndex(0);
+        setQueue([track]);
+        setPosition(0);
+
+        // Initialize audio engine and play
+        (async () => {
+          const engine = new AudioEngine();
+          await engine.resume();
+          engineRef.current = engine;
+          trackIndexRef.current = 0;
+
+          await engine.loadTrack("A", audioUrl);
+          engine.setGain("A", 1);
+          engine.play("A", 0);
+
+          // Start position tracking
+          positionTimerRef.current = window.setInterval(() => {
+            if (!engineRef.current) return;
+            const deck = trackIndexRef.current % 2 === 0 ? "A" : "B";
+            setPosition(engineRef.current.getPosition(deck as "A" | "B"));
+          }, 200);
+        })();
+        break;
+      }
+
+      case "queue_next": {
+        // DJ loop queued the next track
+        const track = msg.track as TrackInfo;
+        const audioUrl = `${API_BASE}${msg.audio_url as string}`;
+        const transition = msg.transition as TransitionInfo | null;
+
+        setQueue(prev => [...prev, track]);
+
+        // Pre-load into standby deck
+        const engine = engineRef.current;
+        if (!engine) break;
+
+        const currentIdx = trackIndexRef.current;
+        const standbyDeck = currentIdx % 2 === 0 ? "B" : "A";
+
+        (async () => {
+          await engine.loadTrack(standbyDeck as "A" | "B", audioUrl);
+
+          // If we have transition info, set up auto-transition
+          if (transition) {
+            const checkInterval = setInterval(() => {
+              if (!engineRef.current) { clearInterval(checkInterval); return; }
+              if (trackIndexRef.current !== currentIdx) { clearInterval(checkInterval); return; }
+
+              const activeDeck = currentIdx % 2 === 0 ? "A" : "B";
+              const pos = engineRef.current.getPosition(activeDeck as "A" | "B");
+
+              if (pos >= transition.mix_out_time) {
+                clearInterval(checkInterval);
+                doRollingTransition(currentIdx, track, audioUrl, transition);
+              }
+            }, 200);
+          }
+        })();
+        break;
+      }
+
       case "skip": {
-        const idx = trackIndexRef.current;
-        doTransition(idx);
+        // TODO: Force immediate transition via rolling planner
         break;
       }
+
       case "song_request":
         setRequests((prev) => [
           ...prev,
           { query: msg.query as string, from: msg.from as string, votes: 0 },
         ]);
         break;
+
       case "vote_update":
         setRequests((prev) => {
           const next = [...prev];
@@ -208,13 +190,16 @@ export function HostView() {
         });
         break;
     }
-  }, [startPlayback, doTransition]);
+  }, [doRollingTransition]);
 
-  const { connected } = useWebSocket({
+  const { connected, send } = useWebSocket({
     sessionId: session?.sessionId ?? "",
     token: session?.hostToken ?? "",
     onMessage: handleWSMessage,
   });
+
+  // Keep sendRef in sync
+  useEffect(() => { sendRef.current = send; }, [send]);
 
   const handleSendChat = useCallback(
     async (message: string) => {
@@ -235,9 +220,9 @@ export function HostView() {
   }, []);
 
   const handleSkip = useCallback(() => {
-    const idx = trackIndexRef.current;
-    doTransition(idx);
-  }, [doTransition]);
+    // Tell backend to skip — DJ loop will send the next track
+    sendRef.current({ type: "chat", message: "skip" });
+  }, []);
 
   // --- Not started yet ---
   if (!session) {

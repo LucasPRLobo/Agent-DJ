@@ -20,6 +20,8 @@ from ..analyzer.track_store import TrackStore
 from ..chat.command_parser import CommandParser
 from ..chat.vibe_parser import VibeParser
 from ..planner.set_planner import SelectionStrategy, plan_next_tracks, plan_set
+from ..planner.energy_tracker import apply_energy_feedback
+from .dj_loop import start_dj_loop, get_dj_loop, stop_dj_loop
 from .session import GuestPermission, Session, SessionManager, SessionState, SongRequest
 from .websocket import ConnectionInfo, ConnectionManager
 
@@ -288,14 +290,9 @@ async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
                 })
 
                 if onboarding.is_complete and onboarding.vibe_profile:
-                    # Show a friendly message instead of raw JSON
                     dj_response = "Got it! Setting up your set now — let's go!"
                     session.vibe_profile = onboarding.vibe_profile
                     session.state = SessionState.PLAYING
-
-                    tracks = track_store.get_all()
-                    set_plan = plan_set(tracks, session.vibe_profile, SelectionStrategy.GREEDY_SCORING)
-                    session.queue = [t.file_path for t in set_plan.tracks]
 
                     await ws_mgr.send_to_session(session_id, {
                         "type": "chat_message",
@@ -305,8 +302,10 @@ async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
                     await ws_mgr.send_to_session(session_id, {
                         "type": "session_started",
                         "vibe": session.vibe_profile.to_dict(),
-                        "set_plan": set_plan.to_dict(),
                     })
+
+                    # Start the rolling DJ loop
+                    start_dj_loop(session, track_store, ws_mgr, str(AUDIO_DIR))
 
                     return {"response": dj_response, "state": session.state.value}
 
@@ -350,16 +349,13 @@ async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
             await ws_mgr.send_to_session(session_id, {
                 "type": "chat_message", "from": "dj", "message": dj_response,
             })
-
-            tracks = track_store.get_all()
-            set_plan = plan_set(tracks, session.vibe_profile, SelectionStrategy.GREEDY_SCORING)
-            session.queue = [t.file_path for t in set_plan.tracks]
-
             await ws_mgr.send_to_session(session_id, {
                 "type": "session_started",
                 "vibe": session.vibe_profile.to_dict(),
-                "set_plan": set_plan.to_dict(),
             })
+
+            # Start the rolling DJ loop
+            start_dj_loop(session, track_store, ws_mgr, str(AUDIO_DIR))
 
             return {"response": dj_response, "state": session.state.value}
 
@@ -416,7 +412,23 @@ async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
                 "query": req.query,
                 "from": name,
             })
-    elif command_type in ("adjust_energy", "adjust_genre", "adjust_tempo", "wind_down"):
+    elif command_type == "adjust_energy":
+        direction = command_params.get("direction", "up")
+        dj_loop = get_dj_loop(session_id)
+        if dj_loop and session.vibe_profile:
+            set_pos = len(dj_loop.played_tracks) * 0.05
+            apply_energy_feedback(session.vibe_profile, direction, set_pos)
+            dj_loop.request_replan()
+        dj_resp = dj_resp or ("Cranking it up!" if direction == "up" else "Bringing it down a notch.")
+        await ws_mgr.send_to_session(session_id, {
+            "type": "dj_command",
+            "command": command_type,
+            "parameters": command_params,
+        })
+    elif command_type in ("adjust_genre", "adjust_tempo", "wind_down"):
+        dj_loop = get_dj_loop(session_id)
+        if dj_loop:
+            dj_loop.request_replan()
         await ws_mgr.send_to_session(session_id, {
             "type": "dj_command",
             "command": command_type,
@@ -484,6 +496,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                         "from": name,
                         "message": chat_msg,
                     })
+
+            elif msg_type == "transition_complete":
+                # Client finished a transition — tell DJ loop to advance
+                dj_loop = get_dj_loop(session_id)
+                if dj_loop:
+                    dj_loop.on_transition_complete()
 
             elif msg_type == "vote":
                 # Vote on a song request
