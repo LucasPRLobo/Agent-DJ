@@ -5,6 +5,7 @@ ready-to-play tracks so the DJ never has to wait for a download.
 """
 
 import asyncio
+import os
 import random
 from pathlib import Path
 
@@ -80,12 +81,22 @@ class BackgroundFetcher:
                 await asyncio.sleep(self.fetch_interval)
 
     async def _fetch_batch(self):
-        """Fetch a batch of tracks."""
+        """Fetch a batch of tracks.
+
+        Strategy:
+        1. Try Last.fm for smart discovery (similar artists, tags)
+        2. Fall back to YouTube search if Last.fm is unavailable
+        """
         if not self.vibe:
             return
 
-        # Generate diverse search queries
-        queries = self._generate_diverse_queries()
+        # Try Last.fm first
+        queries = await self._discover_via_lastfm()
+
+        # Fall back to YouTube search queries if Last.fm found nothing
+        if not queries:
+            queries = self._generate_diverse_queries()
+
         if not queries:
             return
 
@@ -182,6 +193,60 @@ class BackgroundFetcher:
                 print(f"[BG Fetch] Error for '{query}': {e}")
             finally:
                 self.fetching_queries.discard(query)
+
+    async def _discover_via_lastfm(self) -> list[str]:
+        """Use Last.fm to discover tracks — returns YouTube search queries.
+
+        Much smarter than raw YouTube search because Last.fm's similar artist
+        graph goes deep into non-obvious artists.
+        """
+        if not os.environ.get("LASTFM_API_KEY") or not self.vibe:
+            return []
+
+        from .lastfm import discover_tracks, DJ_GENRE_TO_LASTFM_TAGS
+
+        loop = asyncio.get_event_loop()
+
+        # Build seed artists from what's in the library
+        existing = self.store.get_all()
+        seed_artists = []
+        for t in existing:
+            if " - " in t.title:
+                artist = t.title.split(" - ")[-1].strip()
+                if artist.lower() not in {a.lower() for a in seed_artists}:
+                    seed_artists.append(artist)
+
+        # Build tags from vibe genres
+        tags = []
+        for genre in self.vibe.genres:
+            lastfm_tags = DJ_GENRE_TO_LASTFM_TAGS.get(genre, [genre.lower()])
+            tags.extend(lastfm_tags)
+
+        # Also add mood tags
+        tags.extend(self.vibe.mood_tags or [])
+
+        # Artists to avoid (already in library)
+        avoid = {a.lower() for a in seed_artists}
+
+        try:
+            discovered = await loop.run_in_executor(
+                None,
+                lambda: discover_tracks(
+                    seed_artists=seed_artists[:5],
+                    tags=tags[:6],
+                    n_tracks=6,
+                    avoid_artists=avoid,
+                ),
+            )
+
+            queries = [t.search_query for t in discovered]
+            if queries:
+                print(f"[Last.fm] Discovered {len(queries)} tracks: {', '.join(q[:30] for q in queries[:3])}...")
+            return queries
+
+        except Exception as e:
+            print(f"[Last.fm] Discovery failed: {e}")
+            return []
 
     def _generate_diverse_queries(self) -> list[str]:
         """Generate specific search queries — actual song names, not generic genre searches."""
