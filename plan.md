@@ -791,6 +791,393 @@ For remote sessions or if we want to offer it as a service:
 
 ---
 
+## Phase 9: From Playlist to DJ — Short-Term Upgrades
+
+**Goal:** Transform Agent DJ from a "smart playlist with fades" into something that feels like a real DJ performing. Four key upgrades that are all buildable now.
+
+---
+
+### 9.1 Rolling Planner + Auto-Fetch
+
+**The Problem:** Currently we plan the entire set upfront. A real DJ plans 1-2 tracks ahead and adapts constantly.
+
+**The Solution:** Replace the full-set planner with a rolling planner that decides the next track while the current one is playing, and auto-fetches from YouTube when the local library doesn't have a good match.
+
+#### Backend: Rolling DJ Loop
+
+Replace the current "plan full set → send to client" flow with an async loop:
+
+```python
+async def dj_loop(session):
+    while session.state == "playing":
+        current = get_current_track(session)
+        position = get_playback_position(session)  # from client heartbeat
+
+        # If we're approaching the mix-out point and don't have a next track queued
+        if needs_next_track(current, position, session.next_track):
+            # 1. Score all library tracks against current vibe + energy arc position
+            candidates = score_candidates(session.vibe_profile, session.track_store,
+                                          current_track=current,
+                                          played=session.played_tracks,
+                                          position_in_set=session.set_position)
+
+            # 2. If best candidate score is too low, auto-fetch from YouTube
+            if candidates[0].score < QUALITY_THRESHOLD:
+                search_query = generate_search_query(session.vibe_profile, current)
+                new_track = await fetch_and_analyze(search_query)
+                if new_track:
+                    candidates.insert(0, new_track)
+
+            # 3. Plan transition and send to client
+            next_track = candidates[0].track
+            transition = plan_transition(current, next_track, energy_direction)
+
+            session.next_track = next_track
+            session.played_tracks.append(current)
+
+            await ws_mgr.send_to_session(session.id, {
+                "type": "queue_next",
+                "track": next_track.to_dict(),
+                "transition": transition.to_dict(),
+                "audio_url": get_audio_url(next_track),
+            })
+
+        # 4. Check for vibe changes from chat/guests
+        if session.vibe_changed:
+            # Re-score — the next planned track might no longer fit
+            session.next_track = None  # force re-plan
+            session.vibe_changed = False
+
+        await asyncio.sleep(1)
+```
+
+#### Auto-Fetch Search Query Generation
+
+When the library doesn't have a good match, generate a YouTube search query:
+
+```python
+def generate_search_query(vibe, current_track):
+    """Generate a search query for YouTube based on what the DJ needs next."""
+    # Use genre + mood + BPM context
+    genres = [g for g, w in sorted(vibe.genres.items(), key=lambda x: -x[1])[:2]]
+
+    # If we have a current track, find something in the same vein
+    if current_track.classification:
+        top_genre = current_track.classification.genres[0][0]
+        return f"{top_genre} {' '.join(genres)} similar to {current_track.title}"
+
+    return f"{' '.join(genres)} music"
+```
+
+#### Frontend: Receive Rolling Updates
+
+Instead of receiving a full set plan, the client receives `queue_next` messages with one track at a time:
+
+```typescript
+case "queue_next": {
+    const track = msg.track as TrackInfo;
+    const transition = msg.transition as TransitionInfo;
+    // Load into standby deck and set up transition trigger
+    await playbackController.queueNext(track, transition);
+    setQueue(prev => [...prev, track]);
+    break;
+}
+```
+
+#### Deliverables
+- `agent_dj/api/dj_loop.py` — Async DJ brain loop
+- `agent_dj/sources/auto_fetch.py` — Search query generation + on-demand YouTube fetch
+- Update `api/app.py` — Start DJ loop when session enters playing state
+- Update frontend `HostView.tsx` — Handle rolling `queue_next` messages
+- Update `PlaybackController.ts` — Support receiving individual track + transition pairs
+
+---
+
+### 9.2 Structure-Aware Transitions
+
+**The Problem:** Current transitions are just timed volume crossfades. A real DJ uses the song structure — looping the outro, layering the intro, swapping bass at the right moment.
+
+**The Solution:** Use the structure detection and mix points we already extract to execute multi-phase transitions.
+
+#### Transition Phases
+
+A real DJ transition has phases, not just a fade:
+
+```
+Track A playing normally
+    ↓
+Phase 1: CUE POINT — Track A reaches its mix-out point (outro/breakdown)
+    ↓
+Phase 2: INTRO LAYER — Start Track B's intro quietly underneath
+    ↓
+Phase 3: EQ BLEND — Over 16-32 beats:
+    - Cut Track A's bass (highpass filter ramp)
+    - Bring in Track B's bass
+    - Crossfade mids/highs
+    ↓
+Phase 4: DROP — Track B is now dominant
+    - Kill Track A completely or fade its reverb tail
+    ↓
+Track B playing normally
+```
+
+#### Implementation: TransitionExecutor v2
+
+Rewrite transition execution to be multi-phase:
+
+```typescript
+interface TransitionPhase {
+    startBeat: number;       // relative to transition start
+    duration_beats: number;
+    actions: PhaseAction[];
+}
+
+interface PhaseAction {
+    target: "deckA" | "deckB";
+    type: "gain" | "eq_low" | "eq_mid" | "eq_high" | "filter" | "loop_start" | "loop_end";
+    from: number;
+    to: number;
+    curve: "linear" | "exponential" | "step";
+}
+```
+
+**Transition recipes** (pre-built multi-phase plans):
+
+| Recipe | Phases | Best For |
+|---|---|---|
+| **Bass Swap** | Layer intro → Cut A bass → Bring B bass → Fade A out | Same BPM, compatible keys |
+| **Loop & Drop** | Loop A's outro 4 bars → Layer B's intro → Kill A on B's drop | Any BPM, strong drop in B |
+| **Filter Sweep** | Low-pass filter A → Layer B underneath → Open B's filter → Close A's filter | Electronic, house |
+| **Echo Release** | Echo/reverb A → Fade A with tail → Clean B entry | Genre changes, energy drops |
+| **Breakdown Bridge** | A plays into breakdown → B enters during breakdown → Build together → Drop B | Tracks with clear breakdowns |
+
+#### Beat-Aligned Execution
+
+All phase transitions snap to the beat grid:
+
+```typescript
+class BeatAlignedScheduler {
+    // Given a beat grid and current position, schedule an action on the next downbeat
+    scheduleOnNextDownbeat(beatGrid: number[], currentTime: number, action: () => void) {
+        const nextDownbeat = this.findNextDownbeat(beatGrid, currentTime);
+        const delay = nextDownbeat - currentTime;
+        setTimeout(action, delay * 1000);
+    }
+
+    // Schedule a ramp that starts and ends on beat boundaries
+    scheduleRamp(param: AudioParam, from: number, to: number,
+                 startBeat: number, endBeat: number, beatGrid: number[]) {
+        const startTime = beatGrid[startBeat];
+        const endTime = beatGrid[endBeat];
+        param.setValueAtTime(from, startTime);
+        param.linearRampToValueAtTime(to, endTime);
+    }
+}
+```
+
+#### Deliverables
+- `frontend/src/audio/TransitionRecipes.ts` — Pre-built multi-phase transition recipes
+- `frontend/src/audio/BeatScheduler.ts` — Beat-grid-aligned scheduling
+- Update `TransitionExecutor.ts` — Execute multi-phase recipes
+- Update `transition_planner.py` — Choose recipe based on track analysis + energy context
+- Backend sends detailed phase plan, not just "crossfade for 8 seconds"
+
+---
+
+### 9.3 Auto-Expand Library (On-Demand Fetch)
+
+**The Problem:** The DJ only has access to pre-downloaded tracks. A real DJ has thousands of records and can pull anything.
+
+**The Solution:** When the rolling planner can't find a good match in the local library, it searches YouTube, downloads, analyzes, and queues the track — all while the current track is still playing.
+
+#### Pipeline
+
+```
+Rolling planner needs a track
+    ↓
+Score local library → best score < threshold?
+    ↓ yes
+Generate search query from vibe + current context
+    ↓
+YouTube search → pick best result (filter by duration, channel quality)
+    ↓
+Download audio (yt-dlp, ~5-10 seconds)
+    ↓
+Quick analysis (BPM + key only, skip ML classification for speed)
+    ↓
+Verify BPM/key compatibility with current track
+    ↓
+Full analysis in background (ML classification, structure, mix points)
+    ↓
+Queue for playback
+```
+
+#### Quick Analysis Mode
+
+For on-demand fetching, we need a fast analysis path (~2-3 seconds instead of ~30):
+
+```python
+def quick_analyze(file_path: str) -> TrackProfile:
+    """Fast analysis: BPM + key only. Enough to decide if we should queue it."""
+    y, sr = librosa.load(file_path, sr=22050, mono=True, duration=30)  # only first 30s
+    tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+    key, scale, _ = essentia.KeyExtractor()(audio)
+    # Return minimal profile — full analysis runs async later
+```
+
+#### Smart Search Queries
+
+Don't just search for a genre — be specific:
+
+```python
+def generate_search_queries(vibe, current_track, played_tracks):
+    """Generate multiple search queries ranked by specificity."""
+    queries = []
+
+    # 1. Similar artist
+    if current_track.artist:
+        queries.append(f"songs similar to {current_track.artist}")
+
+    # 2. Genre + BPM range hint
+    top_genre = vibe.genres[0] if vibe.genres else "chill"
+    queries.append(f"{top_genre} {current_track.bpm:.0f} BPM")
+
+    # 3. Mood-based
+    if vibe.mood_relaxed > 0.7:
+        queries.append(f"chill {top_genre} smooth vibes")
+    elif vibe.mood_happy > 0.7:
+        queries.append(f"upbeat {top_genre} feel good")
+
+    # 4. From LLM example tracks (if provided during onboarding)
+    for example in vibe.example_tracks:
+        if example not in [t.title for t in played_tracks]:
+            queries.append(example)
+
+    return queries
+```
+
+#### Fetch Timeout & Fallback
+
+If fetching takes too long, fall back to best available local track:
+
+```python
+async def fetch_or_fallback(queries, local_candidates, timeout=15):
+    try:
+        result = await asyncio.wait_for(
+            fetch_and_analyze(queries[0]),
+            timeout=timeout
+        )
+        return result
+    except asyncio.TimeoutError:
+        return local_candidates[0]  # best local match
+```
+
+#### Deliverables
+- `agent_dj/sources/auto_fetch.py` — Search query generation, fetch pipeline, quick analysis
+- `agent_dj/analyzer/audio.py` — Add `quick_analyze()` function
+- Update `dj_loop.py` — Integrate auto-fetch with quality threshold
+- Configurable: `auto_fetch_enabled`, `quality_threshold`, `fetch_timeout`
+
+---
+
+### 9.4 Energy Monitoring & Adaptation
+
+**The Problem:** We plan an energy arc but never check if we're following it. The DJ should notice "we're too chill for where we should be in the set" and course-correct.
+
+**The Solution:** Track actual energy vs target energy and adjust track selection accordingly.
+
+#### Energy Tracker
+
+```python
+class EnergyTracker:
+    def __init__(self, vibe_profile: VibeProfile):
+        self.vibe = vibe_profile
+        self.played_energies: list[float] = []  # actual energy of each played track
+        self.target_energies: list[float] = []  # what the arc says it should be
+
+    def record(self, track: TrackProfile, position_in_set: float):
+        actual = float(np.mean(track.energy_curve))
+        target = self.vibe.get_target_energy(position_in_set)
+        self.played_energies.append(actual)
+        self.target_energies.append(target)
+
+    @property
+    def energy_deficit(self) -> float:
+        """Positive = we're behind the arc (too chill). Negative = ahead (too intense)."""
+        if not self.played_energies:
+            return 0.0
+        recent_actual = np.mean(self.played_energies[-3:])  # last 3 tracks
+        recent_target = np.mean(self.target_energies[-3:])
+        return recent_target - recent_actual
+
+    def adjust_next_target(self, base_target: float) -> float:
+        """Adjust the next track's target energy to compensate for drift."""
+        deficit = self.energy_deficit
+        # If we're behind, boost the target. If ahead, ease off.
+        return np.clip(base_target + deficit * 0.5, 0.1, 1.0)
+```
+
+#### Integration with Rolling Planner
+
+```python
+# In the DJ loop:
+energy_tracker.record(current_track, set_position)
+
+# When scoring candidates:
+raw_target = vibe.get_target_energy(next_position)
+adjusted_target = energy_tracker.adjust_next_target(raw_target)
+# Use adjusted_target for scoring, not raw_target
+```
+
+#### Guest Energy Feedback
+
+When guests press "More Energy" / "Chill Out":
+
+```python
+def apply_energy_feedback(vibe: VibeProfile, direction: str):
+    """Shift the remaining energy arc based on crowd feedback."""
+    shift = 0.15 if direction == "up" else -0.15
+    current_pos = get_current_position()
+
+    # Only shift the remaining arc, not what's already played
+    for i in range(len(vibe.energy_arc)):
+        pos = i / len(vibe.energy_arc)
+        if pos > current_pos:
+            vibe.energy_arc[i] = np.clip(vibe.energy_arc[i] + shift, 0.1, 1.0)
+```
+
+#### Frontend: Live Energy Display
+
+Update the EnergyArc component to show both target and actual:
+
+```
+Target: ▁▂▃▅▇█▇▅▃▁  (planned)
+Actual: ▁▁▂▃▅▇      (what's been played)
+              ↑ you are here
+```
+
+#### Deliverables
+- `agent_dj/planner/energy_tracker.py` — Energy monitoring + deficit compensation
+- Update `dj_loop.py` — Feed energy tracker, use adjusted targets
+- Update `api/app.py` — Apply guest energy feedback to live arc
+- Update `frontend/src/components/EnergyArc.tsx` — Show target vs actual curves
+- WebSocket message: `energy_update` with current actual vs target
+
+---
+
+### Implementation Order
+
+| Step | What | Why First |
+|---|---|---|
+| 1 | **9.1 Rolling Planner** | Core architecture change — everything else builds on top |
+| 2 | **9.3 Auto-Fetch** | Tightly coupled with rolling planner — DJ needs infinite music |
+| 3 | **9.4 Energy Monitoring** | Quick win once rolling planner exists — just add tracking |
+| 4 | **9.2 Structure-Aware Transitions** | Most complex, but biggest quality jump — do after the brain works |
+
+**Milestone:** After all four, the test is: "Can I start a session with 0 pre-loaded tracks, describe a vibe, and have the DJ play for 2 hours — adapting to energy feedback and never repeating a track?"
+
+---
+
 ## Open Research Questions
 
 - How accurate are Essentia's pre-trained classifiers on our target genres? (Phase 1.5)
