@@ -224,6 +224,21 @@ export function HostView() {
     [sendChat]
   );
 
+  const handlePause = useCallback(() => {
+    engineRef.current?.pause();
+    setSessionState("paused");
+  }, []);
+
+  const handleResume = useCallback(() => {
+    engineRef.current?.unpause();
+    setSessionState("playing");
+  }, []);
+
+  const handleSkip = useCallback(() => {
+    const idx = trackIndexRef.current;
+    doTransition(idx);
+  }, [doTransition]);
+
   // --- Not started yet ---
   if (!session) {
     return (
@@ -265,6 +280,9 @@ export function HostView() {
             position={position}
             duration={totalDuration}
             isPlaying={sessionState === "playing"}
+            onPause={handlePause}
+            onResume={handleResume}
+            onSkip={handleSkip}
           />
           <Queue tracks={queue} currentIndex={currentIndex} />
           <EnergyArc arc={energyArc} currentPosition={arcPosition} />

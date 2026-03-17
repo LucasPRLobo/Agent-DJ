@@ -121,7 +121,11 @@ h3 { font-size: 14px; font-weight: 500; color: var(--text-dim); margin-bottom: 8
 
 /* ── Now Playing ── */
 .now-playing { background: var(--surface); padding: 16px; border-radius: 10px; border: 1px solid var(--border); }
-.np-status { font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+.np-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.np-status { font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: 1px; }
+.np-controls { display: flex; gap: 6px; }
+.np-btn { background: transparent; border: 1px solid var(--border); color: var(--text); width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; padding: 0; }
+.np-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .np-title { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
 .np-info { display: flex; gap: 12px; color: var(--text-dim); font-size: 13px; margin-bottom: 10px; }
 .np-progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }

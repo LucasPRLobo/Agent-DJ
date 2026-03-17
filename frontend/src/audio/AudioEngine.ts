@@ -98,6 +98,21 @@ export class AudioEngine {
     return this.ctx.currentTime;
   }
 
+  /** Pause all audio. */
+  async pause(): Promise<void> {
+    await this.ctx.suspend();
+  }
+
+  /** Resume all audio after pause. */
+  async unpause(): Promise<void> {
+    await this.ctx.resume();
+  }
+
+  /** Check if audio is paused. */
+  get isPaused(): boolean {
+    return this.ctx.state === "suspended";
+  }
+
   /** Load an audio file into a deck. */
   async loadTrack(deckId: DeckId, url: string): Promise<void> {
     const response = await fetch(url);
