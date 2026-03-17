@@ -116,10 +116,22 @@ class BackgroundFetcher:
                     if not self._running:
                         break
 
-                    # Skip if already in library
+                    # Skip if already in library (by video ID or similar title)
                     existing = self.store.get_all()
                     existing_ids = {Path(t.file_path).stem for t in existing}
+                    existing_titles = {t.title.lower().split(" - ")[0].strip() for t in existing}
                     if result.video_id in existing_ids:
+                        continue
+
+                    # Check title similarity to avoid duplicates
+                    result_title_clean = result.title.lower()
+                    # Remove common suffixes
+                    for suffix in ["official video", "official audio", "lyrics", "hq", "hd",
+                                   "music video", "audio", "visualizer", "remastered"]:
+                        result_title_clean = result_title_clean.replace(suffix, "")
+                    result_title_clean = result_title_clean.strip(" ()-[]|")
+                    if any(result_title_clean in et or et in result_title_clean
+                           for et in existing_titles if len(et) > 5):
                         continue
 
                     # Skip very short or very long tracks
@@ -170,7 +182,7 @@ class BackgroundFetcher:
                 self.fetching_queries.discard(query)
 
     def _generate_diverse_queries(self) -> list[str]:
-        """Generate diverse search queries to build a varied pool."""
+        """Generate specific search queries — actual song names, not generic genre searches."""
         if not self.vibe:
             return []
 
@@ -179,38 +191,58 @@ class BackgroundFetcher:
         mood_tags = self.vibe.mood_tags or []
         examples = self.vibe.example_tracks or []
 
-        # From example tracks (highest priority)
-        played_titles = {Path(p).stem for p in self.played_paths}
+        # Track what we already have to avoid searching for the same stuff
+        existing = self.store.get_all()
+        existing_titles_lower = {t.title.lower() for t in existing}
+
+        # 1. Example tracks from onboarding (highest priority — actual song names)
         for ex in examples:
-            if ex not in played_titles:
+            if ex.lower() not in existing_titles_lower:
                 queries.append(ex)
 
-        # Genre-specific searches
-        for genre in genres:
-            queries.append(f"best {genre} tracks")
-            queries.append(f"{genre} classics")
-            queries.append(f"new {genre} music 2025 2026")
-
-        # Mood-based searches
-        if mood_tags:
-            tags = " ".join(random.sample(mood_tags, min(2, len(mood_tags))))
-            queries.append(f"{tags} music playlist")
-
-        # BPM-specific
-        mid_bpm = (self.vibe.bpm_range[0] + self.vibe.bpm_range[1]) / 2
-        if genres:
-            queries.append(f"{genres[0]} {mid_bpm:.0f} BPM")
-
-        # Similar artist searches based on what's in the library
-        existing = self.store.get_all()
-        for t in existing[:5]:
+        # 2. Artist-based searches from what's already in the library
+        artists_seen = set()
+        for t in existing:
             if " - " in t.title:
                 artist = t.title.split(" - ")[-1].strip()
-                queries.append(f"songs similar to {artist}")
+                if artist.lower() not in artists_seen:
+                    artists_seen.add(artist.lower())
+                    queries.append(f"{artist} best songs")
 
-        # Shuffle to add variety across runs
+        # 3. Specific song searches per genre (more targeted than generic genre queries)
+        genre_song_prompts = {
+            "RnB / Neo-Soul": ["Erykah Badu", "D'Angelo", "Frank Ocean", "SZA", "Lauryn Hill",
+                               "Jhené Aiko", "Daniel Caesar", "H.E.R.", "Solange", "Summer Walker"],
+            "Jazz": ["Miles Davis", "John Coltrane", "Robert Glasper", "Kamasi Washington",
+                     "Herbie Hancock", "Thelonious Monk", "Tom Misch", "Nujabes"],
+            "House": ["Disclosure", "Kaytranada", "Kerri Chandler", "Frankie Knuckles",
+                      "Fred again..", "Ross From Friends", "Mall Grab"],
+            "Funk": ["Vulfpeck", "Thundercat", "Anderson .Paak", "Daft Punk", "Jamiroquai"],
+            "Soul": ["Marvin Gaye", "Stevie Wonder", "Aretha Franklin", "Leon Bridges", "Alicia Keys"],
+            "Bossa Nova / Latin Jazz": ["Antonio Carlos Jobim", "Astrud Gilberto", "Stan Getz",
+                                         "Bebel Gilberto", "Buena Vista Social Club"],
+            "Hip-Hop": ["J Dilla", "Madlib", "A Tribe Called Quest", "Kendrick Lamar", "Tyler the Creator"],
+            "Ambient / Downtempo": ["Bonobo", "Tycho", "Boards of Canada", "Khruangbin"],
+            "Smooth / Contemporary Jazz": ["Norah Jones", "Diana Krall", "Gregory Porter", "José James"],
+        }
+
+        for genre in genres:
+            artists = genre_song_prompts.get(genre, [])
+            if artists:
+                # Pick 2 random artists we don't already have
+                available = [a for a in artists if a.lower() not in artists_seen]
+                for artist in random.sample(available, min(2, len(available))):
+                    queries.append(f"{artist} {genre}")
+
+        # 4. Mood-specific (but with actual song context, not just "chill music")
+        if mood_tags and genres:
+            genre = genres[0]
+            tags = " ".join(random.sample(mood_tags, min(2, len(mood_tags))))
+            queries.append(f"{tags} {genre} songs")
+
+        # Shuffle and limit
         random.shuffle(queries)
-        return queries[:8]  # limit per batch
+        return queries[:6]
 
     async def _full_analyze(self, file_path: str, title: str):
         """Run full analysis in background."""

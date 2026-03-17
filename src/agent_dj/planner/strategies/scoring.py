@@ -89,20 +89,23 @@ def score_track(
 
     # -- Genre match --
     genre_score = 0.0
-    if candidate.classification and candidate.classification.genres:
+    has_classification = candidate.classification and candidate.classification.genres
+    if has_classification:
         dj_profile = map_to_dj_genres(candidate.classification.genres)
-        # Score = sum of (track genre weight * vibe genre weight) for matching genres
         for genre, track_weight in dj_profile.genres.items():
             if genre in vibe.genres:
                 genre_score += track_weight * vibe.genres[genre]
-        # Normalize to 0-1
         max_possible = sum(vibe.genres.values())
         if max_possible > 0:
             genre_score = min(1.0, genre_score / max_possible)
+    else:
+        # No classification — penalize heavily so classified tracks are preferred
+        # But still allow if BPM fits well (better than nothing)
+        genre_score = 0.1 if bpm_score > 0.7 else 0.0
 
     # -- Mood match --
-    mood_score = 0.5
-    if candidate.classification:
+    mood_score = 0.3  # default for unclassified (slight penalty)
+    if has_classification and candidate.classification:
         clf = candidate.classification
         mood_diffs = [
             abs(clf.mood_happy - vibe.mood_happy),
