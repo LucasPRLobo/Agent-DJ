@@ -47,6 +47,7 @@ export function HostView() {
   const trackIndexRef = useRef(0);
   const positionTimerRef = useRef<number | null>(null);
   const sendRef = useRef<(msg: { type: string; [key: string]: unknown }) => void>(() => {});
+  const pendingNextRef = useRef<{ track: TrackInfo; audioUrl: string; transition: TransitionInfo } | null>(null);
 
   // Clean up audio on unmount
   useEffect(() => {
@@ -66,7 +67,9 @@ export function HostView() {
     const fromDeck = fromIndex % 2 === 0 ? "A" : "B";
     const toDeck = fromIndex % 2 === 0 ? "B" : "A";
 
-    const rate = transition.target_bpm / (nextTrack.bpm || 120);
+    // Only adjust playback rate if BPM difference is small enough
+    const bpmDiff = Math.abs(transition.target_bpm - (nextTrack.bpm || 120));
+    const rate = bpmDiff <= 6 ? transition.target_bpm / (nextTrack.bpm || 120) : 1.0;
     const duration = transition.duration_seconds || 8;
 
     engine.setGain(toDeck as "A" | "B", 0);
@@ -140,6 +143,11 @@ export function HostView() {
 
         setQueue(prev => [...prev, track]);
 
+        // Store for skip functionality
+        if (transition) {
+          pendingNextRef.current = { track, audioUrl, transition };
+        }
+
         // Pre-load into standby deck
         const engine = engineRef.current;
         if (!engine) break;
@@ -161,6 +169,7 @@ export function HostView() {
 
               if (pos >= transition.mix_out_time) {
                 clearInterval(checkInterval);
+                pendingNextRef.current = null;
                 doRollingTransition(currentIdx, track, audioUrl, transition);
               }
             }, 200);
@@ -170,7 +179,13 @@ export function HostView() {
       }
 
       case "skip": {
-        // TODO: Force immediate transition via rolling planner
+        // Force immediate transition to the pending next track
+        const pending = pendingNextRef.current;
+        if (pending) {
+          pendingNextRef.current = null;
+          const idx = trackIndexRef.current;
+          doRollingTransition(idx, pending.track, pending.audioUrl, pending.transition);
+        }
         break;
       }
 
@@ -219,10 +234,14 @@ export function HostView() {
     setSessionState("playing");
   }, []);
 
-  const handleSkip = useCallback(() => {
-    // Tell backend to skip — DJ loop will send the next track
-    sendRef.current({ type: "chat", message: "skip" });
-  }, []);
+  const handleSkip = useCallback(async () => {
+    if (!session) return;
+    // Tell backend to skip via REST
+    await fetch(
+      `${API_BASE}/session/${session.sessionId}/skip?token=${session.hostToken}`,
+      { method: "POST" }
+    );
+  }, [session]);
 
   // --- Not started yet ---
   if (!session) {

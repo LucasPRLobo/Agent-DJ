@@ -200,21 +200,17 @@ def _get_mix_in_time(track: TrackProfile) -> float:
 def _plan_bpm_match(bpm_a: float, bpm_b: float) -> tuple[float, str]:
     """Decide target BPM and which track to adjust.
 
-    Strategy: adjust the track that needs less change.
-    If diff is very small (<2 BPM), match to the incoming track.
+    Strategy:
+    - <3 BPM diff: match to incoming (barely noticeable)
+    - 3-6 BPM diff: meet in the middle
+    - >6 BPM diff: don't adjust — play at native BPM (sounds unnatural when stretched too much)
     """
     diff = abs(bpm_a - bpm_b)
 
-    if diff < 2:
-        # Minor difference — match to incoming
+    if diff < 3:
         return bpm_b, "from"
-    elif diff < 5:
-        # Meet in the middle
+    elif diff <= 6:
         return round((bpm_a + bpm_b) / 2, 1), "both"
     else:
-        # Large diff — adjust the one with less absolute change needed
-        mid = (bpm_a + bpm_b) / 2
-        if abs(bpm_a - mid) < abs(bpm_b - mid):
-            return round(mid, 1), "both"
-        else:
-            return bpm_b, "from"
+        # Too large — play at native BPM, no stretching
+        return bpm_b, "none"

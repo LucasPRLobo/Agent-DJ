@@ -24,8 +24,8 @@ class BackgroundFetcher:
         self,
         store: TrackStore,
         audio_dir: str = "samples",
-        pool_target: int = 15,
-        fetch_interval: float = 10.0,
+        pool_target: int = 10,
+        fetch_interval: float = 30.0,
     ):
         self.store = store
         self.audio_dir = audio_dir
@@ -90,11 +90,15 @@ class BackgroundFetcher:
             return
 
         loop = asyncio.get_event_loop()
+        downloaded_this_batch = 0
+        max_per_batch = 2
 
         for query in queries:
             if not self._running:
                 break
             if self.pool_size >= self.pool_target:
+                break
+            if downloaded_this_batch >= max_per_batch:
                 break
             if query in self.fetching_queries:
                 continue
@@ -152,12 +156,13 @@ class BackgroundFetcher:
                     # Save quick profile
                     self.store.save(profile)
                     print(f"[BG Fetch] Added: {title} ({profile.bpm} BPM, {profile.key})")
+                    downloaded_this_batch += 1
 
                     # Full analysis in background
                     asyncio.create_task(self._full_analyze(dl.file_path, title))
 
-                    # Small delay between downloads
-                    await asyncio.sleep(2)
+                    # Delay between downloads to avoid hammering YouTube
+                    await asyncio.sleep(8)
 
             except Exception as e:
                 print(f"[BG Fetch] Error for '{query}': {e}")

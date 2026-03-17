@@ -138,10 +138,14 @@ class DJLoop:
         raw_target = vibe.get_target_energy(set_position)
         target_energy = self.energy_tracker.adjust_next_target(raw_target) if self.energy_tracker else raw_target
 
-        # Score local library
+        # Score local library — exclude played tracks by path AND title
         all_tracks = self.store.get_all()
         played_paths = {t.file_path for t in self.played_tracks}
-        candidates = [t for t in all_tracks if t.file_path not in played_paths]
+        played_titles = {t.title.lower() for t in self.played_tracks}
+        candidates = [
+            t for t in all_tracks
+            if t.file_path not in played_paths and t.title.lower() not in played_titles
+        ]
 
         best_track = None
         best_score = 0.0

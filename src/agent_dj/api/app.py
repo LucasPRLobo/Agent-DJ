@@ -246,6 +246,30 @@ async def get_library():
     ]
 
 
+@app.post("/session/{session_id}/skip")
+async def skip_track(session_id: str, token: str = Query(...)):
+    """Skip the current track."""
+    session = session_mgr.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    auth = session_mgr.authenticate(session_id, token)
+    if not auth:
+        raise HTTPException(403, "Invalid token")
+
+    dj_loop = get_dj_loop(session_id)
+    if dj_loop and dj_loop.next_track:
+        # Tell client to transition immediately
+        await ws_mgr.send_to_session(session_id, {"type": "skip"})
+        return {"status": "skipping"}
+    else:
+        # No next track ready — force DJ loop to plan one now
+        if dj_loop:
+            dj_loop.needs_replan = True
+            dj_loop.next_track = None
+        return {"status": "planning_next"}
+
+
 @app.post("/session/{session_id}/chat")
 async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
     """Send a chat message to the DJ."""
