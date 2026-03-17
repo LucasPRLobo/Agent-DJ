@@ -286,13 +286,10 @@ async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
                     "from": name,
                     "message": msg.message,
                 })
-                await ws_mgr.send_to_session(session_id, {
-                    "type": "chat_message",
-                    "from": "dj",
-                    "message": dj_response,
-                })
 
                 if onboarding.is_complete and onboarding.vibe_profile:
+                    # Show a friendly message instead of raw JSON
+                    dj_response = "Got it! Setting up your set now — let's go!"
                     session.vibe_profile = onboarding.vibe_profile
                     session.state = SessionState.PLAYING
 
@@ -301,10 +298,24 @@ async def chat(session_id: str, msg: ChatMessage, token: str = Query(...)):
                     session.queue = [t.file_path for t in set_plan.tracks]
 
                     await ws_mgr.send_to_session(session_id, {
+                        "type": "chat_message",
+                        "from": "dj",
+                        "message": dj_response,
+                    })
+                    await ws_mgr.send_to_session(session_id, {
                         "type": "session_started",
                         "vibe": session.vibe_profile.to_dict(),
                         "set_plan": set_plan.to_dict(),
                     })
+
+                    return {"response": dj_response, "state": session.state.value}
+
+                # Still onboarding — send the DJ's follow-up question
+                await ws_mgr.send_to_session(session_id, {
+                    "type": "chat_message",
+                    "from": "dj",
+                    "message": dj_response,
+                })
 
                 return {"response": dj_response, "state": session.state.value}
 
