@@ -27,21 +27,10 @@ class VibeParser:
     def start_session(self) -> tuple[OnboardingSession, str]:
         """Start a new onboarding session. Returns the DJ's opening message."""
         session = OnboardingSession()
-
-        # Get the DJ's opening message
-        response = self.client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            system=ONBOARDING_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": "Hey, I need a DJ for tonight!"}],
-        )
-
-        dj_message = response.content[0].text
+        dj_message = "Hey! What kind of vibe are we going for tonight? Tell me the occasion, what music you're into, and how long you need me to play."
         session.messages = [
-            {"role": "user", "content": "Hey, I need a DJ for tonight!"},
             {"role": "assistant", "content": dj_message},
         ]
-
         return session, dj_message
 
     def send_message(self, session: OnboardingSession, user_message: str) -> str:
