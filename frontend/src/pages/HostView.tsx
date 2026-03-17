@@ -218,7 +218,7 @@ export function HostView() {
 
   const handleSendChat = useCallback(
     async (message: string) => {
-      setMessages((prev) => [...prev, { from: "You", message }]);
+      // Don't add optimistically — WebSocket broadcast will add it
       await sendChat(message);
     },
     [sendChat]
